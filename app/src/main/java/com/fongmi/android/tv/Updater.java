@@ -168,13 +168,19 @@ public class Updater implements UpdateTransfer.Callback, UpdateListener {
     }
 
     private Update getGithubStableUpdate(String channel) {
+        String manifestName = getManifestName(channel);
         try {
-            JSONObject release = new JSONObject(UpdateHttp.string(Github.getLatestReleaseApi(), GITHUB_API_HEADERS, GITHUB_REQUEST_TIMEOUT_MS));
-            return readGithubReleaseUpdate(channel, release);
+            JSONArray releases = new JSONArray(UpdateHttp.string(Github.getReleasesApi(), GITHUB_API_HEADERS, GITHUB_REQUEST_TIMEOUT_MS));
+            for (int i = 0; i < releases.length(); i++) {
+                JSONObject release = releases.optJSONObject(i);
+                if (release == null || isBetaRelease(release)) continue;
+                if (findAsset(release.optJSONArray("assets"), manifestName) == null) continue;
+                return readGithubReleaseUpdate(channel, release);
+            }
         } catch (Exception e) {
             e.printStackTrace();
-            return Update.empty(channel);
         }
+        return Update.empty(channel);
     }
 
     private Update getGithubBetaUpdate(String channel) {
@@ -283,7 +289,13 @@ public class Updater implements UpdateTransfer.Callback, UpdateListener {
 
     private String getAssetName(String channel, String ext) {
         String suffix = Update.CHANNEL_BETA.equals(channel) ? "-beta" : "";
+        if (isMpvBuild()) suffix += "-mpv";
         return getName() + suffix + "." + ext;
+    }
+
+    private boolean isMpvBuild() {
+        String id = BuildConfig.APPLICATION_ID;
+        return !TextUtils.isEmpty(id) && (id.endsWith(".mpv") || id.contains(".mpv."));
     }
 
     private String getGithubApkUrl(Update update) {
