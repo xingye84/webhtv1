@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag, blank = v<versionName>-yyyyMMddHHmm or v<versionName>-beta-yyyyMMddHHmm"
+        description: "Release tag, blank = auto. main/my: v<version>-yyyyMMddHHmm[+beta]; MPV/mympv: ...-mpv / ...-beta-mpv"
         required: false
         type: string
       release_channel:
@@ -116,21 +116,38 @@ jobs:
           VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle | head -1)"
           VERSION_CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle | head -1)"
           CHANNEL="${{ inputs.release_channel }}"
-          if [ "$CHANNEL" = "beta" ]; then
+          STAMP="$(date +%Y%m%d%H%M)"
+          case "${GITHUB_REF_NAME}" in
+            MPV|mympv) BUILD_LINE="mpv" ;;
+            *) BUILD_LINE="main" ;;
+          esac
+          if [ "$BUILD_LINE" = "mpv" ]; then
+            if [ "$CHANNEL" = "beta" ]; then
+              APK_SUFFIX="-beta-mpv"
+              TAG_PATTERN="^v${VERSION_NAME}-[0-9]{12}-beta-mpv$"
+              TAG_DEFAULT="v${VERSION_NAME}-${STAMP}-beta-mpv"
+              TAG_EXPECT="v${VERSION_NAME}-yyyyMMddHHmm-beta-mpv"
+            else
+              APK_SUFFIX="-mpv"
+              TAG_PATTERN="^v${VERSION_NAME}-[0-9]{12}-mpv$"
+              TAG_DEFAULT="v${VERSION_NAME}-${STAMP}-mpv"
+              TAG_EXPECT="v${VERSION_NAME}-yyyyMMddHHmm-mpv"
+            fi
+          elif [ "$CHANNEL" = "beta" ]; then
             APK_SUFFIX="-beta"
             TAG_PATTERN="^v${VERSION_NAME}-beta-[0-9]{12}$"
-            TAG_DEFAULT="v${VERSION_NAME}-beta-$(date +%Y%m%d%H%M)"
+            TAG_DEFAULT="v${VERSION_NAME}-beta-${STAMP}"
             TAG_EXPECT="v${VERSION_NAME}-beta-yyyyMMddHHmm"
           else
             APK_SUFFIX=""
             TAG_PATTERN="^v${VERSION_NAME}-[0-9]{12}$"
-            TAG_DEFAULT="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
+            TAG_DEFAULT="v${VERSION_NAME}-${STAMP}"
             TAG_EXPECT="v${VERSION_NAME}-yyyyMMddHHmm"
           fi
           TAG="${{ inputs.release_tag }}"
           if [ -z "$TAG" ]; then TAG="$TAG_DEFAULT"; fi
           if ! printf '%s' "$TAG" | grep -Eq "$TAG_PATTERN"; then
-            echo "::error title=Invalid release tag::Expected $TAG_EXPECT, got: $TAG"
+            echo "::error title=Invalid release tag::Expected $TAG_EXPECT on ${GITHUB_REF_NAME}, got: $TAG"
             exit 1
           fi
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -144,6 +161,7 @@ jobs:
             echo "version_code=$VERSION_CODE"
             echo "short_sha=$(git rev-parse --short=7 HEAD)"
             echo "channel=$CHANNEL"
+            echo "build_line=$BUILD_LINE"
             echo "apk_suffix=$APK_SUFFIX"
           } >> "$GITHUB_OUTPUT"
 
