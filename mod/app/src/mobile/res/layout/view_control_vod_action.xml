@@ -130,6 +130,12 @@
             style="@style/Control"
             android:text="@string/play_change" />
 
+<com.google.android.material.textview.MaterialTextView
+            android:id="@+id/videoSize"
+            style="@style/Control"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
         <com.google.android.material.textview.MaterialTextView
             android:id="@+id/screenshot"
             style="@style/Control"

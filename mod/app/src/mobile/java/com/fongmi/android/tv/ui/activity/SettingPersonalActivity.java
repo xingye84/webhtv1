@@ -77,6 +77,12 @@ public class SettingPersonalActivity extends BaseActivity {
         try { mBinding.playbackScreenshotBtn.setOnClickListener(this::setPlaybackScreenshotBtn); } catch (Throwable ignored) {}
         try { mBinding.screenshotBrightnessBoost.setOnClickListener(this::setScreenshotBrightnessBoost); } catch (Throwable ignored) {}
         try { mBinding.hdrToSdr.setOnClickListener(this::setHdrToSdr); } catch (Throwable ignored) {}
+        try {
+            mBinding.showVideoSizeSetting.setOnClickListener(view -> {
+                Setting.putShowVideoSize(!Setting.isShowVideoSize());
+                mBinding.showVideoSizeSettingText.setText(getSwitch(Setting.isShowVideoSize()));
+            });
+        } catch (Throwable ignored) {}
         try { mBinding.webviewLive.setOnClickListener(this::setWebViewLive); } catch (Throwable ignored) {}
         try { mBinding.recommendSource.setOnClickListener(this::setRecommendSource); } catch (Throwable ignored) {}
         try {
@@ -106,6 +112,7 @@ public class SettingPersonalActivity extends BaseActivity {
             mBinding.globalHistoryText.setText(String.valueOf(gh));
         }
         mBinding.playBackToDetailText.setText(getSwitch(Setting.isPlayBackToDetail()));
+        try { mBinding.showVideoSizeSettingText.setText(getSwitch(Setting.isShowVideoSize())); } catch (Throwable ignored) {}
         mBinding.searchThreadText.setText(String.valueOf(Setting.getSearchThread()));
         mBinding.subtitleAutoMatchText.setText(getSwitch(Setting.isSubtitleAutoMatchEnabled()));
         String lang = Setting.getSubtitlePreferredLanguage();

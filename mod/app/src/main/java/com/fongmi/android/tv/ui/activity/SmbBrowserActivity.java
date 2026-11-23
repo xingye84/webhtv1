@@ -1,6 +1,7 @@
 package com.fongmi.android.tv.ui.activity;
 
 import android.app.Activity;
+import android.content.pm.ActivityInfo;
 import android.app.Dialog;
 import android.content.pm.PackageManager;
 import android.content.Intent;
@@ -62,7 +63,7 @@ import java.util.concurrent.Executors;
 
 public class SmbBrowserActivity extends AppCompatActivity {
 
-    private enum Mode { HOSTS, SHARES, FILES, HIDDEN_FOLDERS }
+    private enum Mode { HOSTS, SHARES, FILES, HIDDEN_FOLDERS, FAVORITES }
 
     private static final int REQUEST_LOCAL_NETWORK = 7301;
     private static final int REQUEST_INSTALL_APK_PERMISSION = 7302;
@@ -77,6 +78,8 @@ public class SmbBrowserActivity extends AppCompatActivity {
     private final Map<String, String> savedHosts = new LinkedHashMap<>();
     private final Set<String> hiddenHosts = new LinkedHashSet<>();
     private final Set<String> hiddenFolders = new LinkedHashSet<>();
+    private final Set<String> favorites = new LinkedHashSet<>();
+    private final List<String> hiddenEntries = new ArrayList<>();
 
     private LinearLayout root;
     private TextView title;
@@ -94,6 +97,7 @@ public class SmbBrowserActivity extends AppCompatActivity {
     private boolean loginAttempted;
     private boolean showingHiddenHosts;
     private boolean showingHiddenFolders;
+    private boolean showingFavorites;
     private boolean installingApk;
     private File pendingApkFile;
 
@@ -109,7 +113,7 @@ public class SmbBrowserActivity extends AppCompatActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                if (mode == Mode.HOSTS && !showingHiddenHosts && !showingHiddenFolders) finish();
+                if (mode == Mode.HOSTS && !showingHiddenHosts && !showingHiddenFolders && !showingFavorites) finish();
                 else goBack();
             }
         });
@@ -139,17 +143,16 @@ public class SmbBrowserActivity extends AppCompatActivity {
 
         MaterialButton back = themedButton("关闭");
         back.setOnClickListener(v -> finish());
-        MaterialButton hidden = themedButton("显示隐藏IP");
-        hidden.setOnClickListener(v -> showHiddenHosts());
-        MaterialButton hiddenFoldersButton = themedButton("显示隐藏文件夹");
-        hiddenFoldersButton.setOnClickListener(v -> showHiddenFolders());
+        MaterialButton favoritesButton = themedButton("收藏夹");
+        favoritesButton.setOnClickListener(v -> showFavorites());
+        MaterialButton hiddenButton = themedButton("显示隐藏");
+        hiddenButton.setOnClickListener(v -> showHiddenItems());
         back.setId(View.generateViewId());
-        hidden.setId(View.generateViewId());
-        hiddenFoldersButton.setId(View.generateViewId());
-
+        favoritesButton.setId(View.generateViewId());
+        hiddenButton.setId(View.generateViewId());
         addToolbarButton(toolbar, back);
-        addToolbarButton(toolbar, hidden);
-        addToolbarButton(toolbar, hiddenFoldersButton);
+        addToolbarButton(toolbar, favoritesButton);
+        addToolbarButton(toolbar, hiddenButton);
         root.addView(toolbar);
 
         status = new TextView(this);
@@ -167,7 +170,7 @@ public class SmbBrowserActivity extends AppCompatActivity {
         list.setBackgroundColor(surface);
         adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, displayItems);
         list.setAdapter(adapter);
-        configureToolbarFocus(back, hidden, hiddenFoldersButton);
+        configureToolbarFocus(back, favoritesButton, hiddenButton);
         list.setOnKeyListener((view, keyCode, event) -> {
             if (event.getAction() == KeyEvent.ACTION_DOWN
                     && keyCode == KeyEvent.KEYCODE_DPAD_UP
@@ -179,14 +182,12 @@ public class SmbBrowserActivity extends AppCompatActivity {
         });
         list.setOnItemClickListener((parent, view, position, id) -> onItemClick(position));
         list.setOnItemLongClickListener((parent, view, position, id) -> {
-            if (showingHiddenHosts) {
-                if (position < 0 || position >= hiddenHosts.size()) return false;
-                if (!isTvDevice()) restoreHiddenHost(new ArrayList<>(hiddenHosts).get(position));
+            if (showingHiddenHosts || showingHiddenFolders) {
+                if (!isTvDevice()) activateHiddenItem(position);
                 return true;
             }
-            if (showingHiddenFolders) {
-                if (position < 0 || position >= hiddenFolders.size()) return false;
-                if (!isTvDevice()) restoreHiddenFolder(position);
+            if (showingFavorites) {
+                showFavoriteActions(position);
                 return true;
             }
             if (mode == Mode.SHARES && position >= 0 && position < shares.size()) {
@@ -195,10 +196,10 @@ public class SmbBrowserActivity extends AppCompatActivity {
             }
             if (mode == Mode.FILES) {
                 int filePosition = position;
-                if (filePosition >= 0 && filePosition < visibleFiles.size() && visibleFiles.get(filePosition).directory) {
-                    String folderPath = path.isEmpty() ? visibleFiles.get(filePosition).name : path + "\\" + visibleFiles.get(filePosition).name;
-                    showFolderActions(folderPath);
-                    return true;
+                if(filePosition>=0&&filePosition<visibleFiles.size()) {
+                    SmbClient.Entry entry=visibleFiles.get(filePosition);
+                    String remote=path.isEmpty()?entry.name:path+"\\"+entry.name;
+                    showFileActions(remote,entry.directory); return true;
                 }
             }
             if (mode != Mode.HOSTS || position < 0 || position >= hosts.size()) return false;
@@ -210,8 +211,8 @@ public class SmbBrowserActivity extends AppCompatActivity {
         setContentView(root);
     }
 
-    private void configureToolbarFocus(MaterialButton back, MaterialButton hidden, MaterialButton hiddenFoldersButton) {
-        MaterialButton[] buttons = new MaterialButton[]{back, hidden, hiddenFoldersButton};
+    private void configureToolbarFocus(MaterialButton back, MaterialButton favorites, MaterialButton hidden) {
+        MaterialButton[] buttons = new MaterialButton[]{back, favorites, hidden};
         for (int i = 0; i < buttons.length; i++) {
             MaterialButton button = buttons[i];
             button.setFocusable(true);
@@ -247,14 +248,14 @@ public class SmbBrowserActivity extends AppCompatActivity {
         MaterialButton button = new MaterialButton(this);
         button.setText(label);
         button.setTextColor(foreground);
-        int focusedBackground = MaterialColors.getColor(this, com.google.android.material.R.attr.colorSecondaryContainer, 0xFF536A88);
-        button.setBackgroundTintList(new ColorStateList(
+        button.setBackgroundTintList(ColorStateList.valueOf(background));
+        button.setStrokeWidth(dp(2));
+        button.setStrokeColor(new ColorStateList(
                 new int[][]{
                         new int[]{android.R.attr.state_focused},
-                        new int[]{android.R.attr.state_pressed},
                         new int[]{}
                 },
-                new int[]{focusedBackground, focusedBackground, background}
+                new int[]{0xFF8CCBFF, Color.TRANSPARENT}
         ));
         button.setCornerRadius(dp(10));
         button.setInsetTop(0);
@@ -271,6 +272,7 @@ public class SmbBrowserActivity extends AppCompatActivity {
         android.content.SharedPreferences preferences = getSharedPreferences("smb_hosts", MODE_PRIVATE);
         loadStringSet(preferences, "hidden", hiddenHosts);
         loadStringSet(preferences, "hidden_folders", hiddenFolders);
+        loadStringSet(preferences, "favorites", favorites);
         String json = preferences.getString("saved", "{}");
         try {
             JSONObject object = new JSONObject(json);
@@ -291,9 +293,10 @@ public class SmbBrowserActivity extends AppCompatActivity {
             for (Object value : (Set<?>) stored) {
                 if (value instanceof String) snapshot.add((String) value);
             }
+            target.clear();
             target.addAll(snapshot);
-        } catch (RuntimeException ignored) {
-            // Keep existing in-memory entries if a stored value cannot be read.
+        } catch (RuntimeException error) {
+            if (logActive()) android.util.Log.d("WebHTV-SMB", "load key=" + key + " failed: " + error.getClass().getSimpleName());
         }
     }
 
@@ -303,13 +306,15 @@ public class SmbBrowserActivity extends AppCompatActivity {
         if (!saved) Toast.makeText(this, "隐藏记录保存失败，请重试", Toast.LENGTH_LONG).show();
     }
 
+    private static boolean logActive() { return false; }
+
     private void persistSavedHosts() {
         JSONObject object = new JSONObject();
         try {
             for (Map.Entry<String, String> entry : savedHosts.entrySet()) {
                 object.put(entry.getKey(), entry.getValue());
             }
-            getSharedPreferences("smb_hosts", MODE_PRIVATE).edit().putString("saved", object.toString()).apply();
+            getSharedPreferences("smb_hosts", MODE_PRIVATE).edit().putString("saved", object.toString()).commit();
         } catch (Exception ignored) {
         }
     }
@@ -330,7 +335,14 @@ public class SmbBrowserActivity extends AppCompatActivity {
         return host + "\n" + shareName + "\n";
     }
 
+    private boolean isHiddenHost(String value) {
+        String expected = normalizeSmbPath(value);
+        for (String item : hiddenHosts) if (normalizeSmbPath(item).equals(expected)) return true;
+        return false;
+    }
+
     private boolean isHiddenShare(String shareName) {
+        if (host == null || shareName == null) return false;
         String expectedHost = normalizeSmbPath(host);
         String expectedShare = normalizeSmbPath(shareName);
         for (String value : hiddenFolders) {
@@ -343,6 +355,7 @@ public class SmbBrowserActivity extends AppCompatActivity {
     }
 
     private boolean isHiddenFolder(String folderPath) {
+        if (host == null || share == null || folderPath == null) return false;
         String expectedHost = normalizeSmbPath(host);
         String expectedShare = normalizeSmbPath(share);
         String expectedPath = normalizeSmbPath(folderPath);
@@ -365,38 +378,84 @@ public class SmbBrowserActivity extends AppCompatActivity {
         return normalized.toLowerCase(java.util.Locale.ROOT);
     }
 
-    private void showHiddenFolders() {
-        showingHiddenHosts = false;
-        showingHiddenFolders = true;
-        mode = Mode.HIDDEN_FOLDERS;
-        title.setText("已隐藏的 SMB 文件夹");
-        List<String> labels = new ArrayList<>();
-        for (String value : hiddenFolders) {
-            String[] parts = value.split("\\n", 3);
-            if (parts.length == 3) {
-                labels.add(normalizeSmbPath(parts[2]).isEmpty() ? parts[0] + " / " + parts[1]
-                        : parts[0] + " / " + parts[1] + " / " + parts[2]);
-            } else labels.add(value);
+    private void showHiddenItems() {
+        showingHiddenHosts=true; showingHiddenFolders=true; showingFavorites=false;
+        mode=Mode.HIDDEN_FOLDERS; title.setText("显示隐藏"); hiddenEntries.clear();
+        List<String> ips=new ArrayList<>(hiddenHosts); ips.sort(String.CASE_INSENSITIVE_ORDER);
+        for(String value:ips) hiddenEntries.add("IP|"+value);
+        List<String> paths=new ArrayList<>(hiddenFolders);
+        paths.sort((x,y)->hiddenLabel(x).compareToIgnoreCase(hiddenLabel(y)));
+        for(String value:paths) hiddenEntries.add("PATH|"+value);
+        List<String> labels=new ArrayList<>();
+        for(String entry:hiddenEntries) {
+            String[] pair=entry.split("\\|",2); String value=pair[1];
+            if(pair[0].equals("IP")) labels.add(value);
+            else { String[] p=value.split("\\n",3);
+                labels.add(p.length==3?p[0]+" / "+p[1]+(p[2].isEmpty()?"":" / "+p[2]):value); }
         }
         setItems(labels);
-        setStatus(hiddenFolders.isEmpty() ? "没有隐藏的文件夹"
-                : (isTvDevice() ? "选择文件夹即可恢复显示" : "长按文件夹可恢复显示"));
+        setStatus(hiddenEntries.isEmpty()?"没有隐藏项目":(isTvDevice()?"短按恢复显示":"长按恢复显示"));
+    }
+    private String hiddenLabel(String value) {
+        String[] p=value.split("\\n",3);
+        return p.length==3?p[0]+" / "+p[1]+" / "+p[2]:value;
+    }
+    private void activateHiddenItem(int position) {
+        if(position<0||position>=hiddenEntries.size()) return;
+        String[] p=hiddenEntries.get(position).split("\\|",2);
+        if(p[0].equals("IP")) restoreHiddenHost(p[1]); else restoreHiddenFolderValue(p[1]);
+    }
+    private void restoreHiddenFolderValue(String value) {
+        if(value==null||!hiddenFolders.remove(value)) return;
+        persistHiddenFolders(); showHiddenItems();
+        Toast.makeText(this,"已恢复显示路径",Toast.LENGTH_SHORT).show();
     }
 
-    private void showFolderActions(String folderPath) {
-        if (folderPath == null || folderPath.isEmpty()) return;
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(folderPath)
-                .setItems(new String[]{"隐藏此文件夹"}, (dialog, which) -> hideFolder(folderPath))
-                .show();
+    private String favoriteKey(String remote, boolean directory) {
+        return host+"\n"+share+"\n"+remote+"\n"+(directory?"D":"F");
+    }
+    private void addFavorite(String remote, boolean directory) {
+        if(remote==null||remote.isEmpty()) return;
+        favorites.add(favoriteKey(remote,directory)); persistStringSet("favorites",favorites);
+        Toast.makeText(this,"已加入收藏夹",Toast.LENGTH_SHORT).show();
+    }
+    private void showFolderActions(String folderPath) { showFileActions(folderPath,true); }
+    private void showFileActions(String remote, boolean directory) {
+        String key=favoriteKey(remote,directory); boolean saved=favorites.contains(key);
+        String[] actions=directory?new String[]{"隐藏此文件夹",saved?"取消收藏":"加入收藏夹"}
+                :new String[]{saved?"取消收藏":"加入收藏夹"};
+        new MaterialAlertDialogBuilder(this).setTitle(remote).setItems(actions,(d,w)->{
+            if(directory&&w==0) hideFolder(remote);
+            else { if(saved) favorites.remove(key); else favorites.add(key);
+                persistStringSet("favorites",favorites); }
+        }).show();
+    }
+    private void showFavorites() {
+        showingFavorites=true; showingHiddenHosts=false; showingHiddenFolders=false;
+        mode=Mode.FAVORITES; title.setText("收藏夹");
+        List<String> labels=new ArrayList<>();
+        for(String value:favorites) { String[] p=value.split("\\n",4);
+            if(p.length==4) labels.add((p[3].equals("D")?"📁  ":"★  ")+p[0]+" / "+p[1]+" / "+p[2]); }
+        setItems(labels);
+        setStatus(favorites.isEmpty()?"收藏夹为空":(isTvDevice()?"短按打开，菜单键取消收藏":"短按打开，长按取消收藏"));
+    }
+    private void openFavorite(int position) {
+        List<String> values=new ArrayList<>(favorites);
+        if(position<0||position>=values.size()) return;
+        String[] p=values.get(position).split("\\n",4); if(p.length!=4)return;
+        host=p[0]; share=p[1]; String remote=p[2]; boolean dir=p[3].equals("D");
+        if(dir) { path=remote; if(path.isEmpty()) openShare(share); else loadDirectory(); return; }
+        int cut=remote.lastIndexOf((char)92); String name=cut<0?remote:remote.substring(cut+1);
+        path=cut<0?"":remote.substring(0,cut);
+        if(SmbClient.isVideo(name)||SmbClient.isAudio(name)) play(remote);
+        else if(SmbClient.isImage(name)) showImage(remote);
+        else if(SmbClient.isApk(name)) installApk(remote);
     }
 
     private void showShareActions(String shareName) {
         if (shareName == null || shareName.isEmpty()) return;
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(shareName)
-                .setItems(new String[]{"隐藏此路径"}, (dialog, which) -> hideShare(shareName))
-                .show();
+        new MaterialAlertDialogBuilder(this).setTitle(shareName)
+                .setItems(new String[]{"隐藏此路径"},(d,w)->hideShare(shareName)).show();
     }
 
     private void hideShare(String shareName) {
@@ -416,34 +475,48 @@ public class SmbBrowserActivity extends AppCompatActivity {
         Toast.makeText(this, "已隐藏文件夹：" + folderPath, Toast.LENGTH_SHORT).show();
     }
 
-    private void restoreHiddenFolder(int position) {
-        if (position < 0 || position >= hiddenFolders.size()) return;
-        String value = new ArrayList<>(hiddenFolders).get(position);
-        hiddenFolders.remove(value);
-        persistHiddenFolders();
-        showHiddenFolders();
-        Toast.makeText(this, "已恢复显示文件夹", Toast.LENGTH_SHORT).show();
+    private void showFavoriteActions(int position) {
+        List<String> values = new ArrayList<>(favorites);
+        if (position < 0 || position >= values.size()) return;
+        String favorite = values.get(position);
+        new MaterialAlertDialogBuilder(this)
+                .setItems(new String[]{"取消收藏"}, (dialog, which) -> {
+                    if (!favorites.remove(favorite)) return;
+                    persistStringSet("favorites", favorites);
+                    showFavorites();
+                    Toast.makeText(this, "已取消收藏", Toast.LENGTH_SHORT).show();
+                })
+                .show();
     }
 
     private boolean isTvDevice() {
         return getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
     }
 
-    private void showHiddenHosts() {
-        showingHiddenHosts = true;
-        title.setText("已隐藏的 SMB 地址");
-        setItems(new ArrayList<>(hiddenHosts));
-        setStatus(hiddenHosts.isEmpty() ? "没有隐藏的地址"
-                : (isTvDevice() ? "选择地址即可恢复显示" : "长按地址可恢复显示"));
+    private void restoreHiddenHost(String value) {
+        if (value == null) return;
+        String stored = null;
+        for (String item : hiddenHosts) if (normalizeSmbPath(item).equals(normalizeSmbPath(value))) { stored = item; break; }
+        if (stored == null || !hiddenHosts.remove(stored)) return;
+        persistHiddenHosts();
+        refreshHostsQuietly();
+        showHiddenItems();
+        Toast.makeText(this, "已恢复显示：" + value, Toast.LENGTH_SHORT).show();
     }
 
-    private void restoreHiddenHost(String value) {
-        if (value == null || !hiddenHosts.remove(value)) return;
-        persistHiddenHosts();
-        if (!hosts.contains(value)) hosts.add(value);
-        if (showingHiddenHosts) showHiddenHosts();
-        else setItems(hostLabels());
-        Toast.makeText(this, "已恢复显示：" + value, Toast.LENGTH_SHORT).show();
+    private void refreshHostsQuietly() {
+        worker.execute(() -> {
+            try {
+                List<String> found = SmbNetworkScanner.scan();
+                runOnUiThread(() -> {
+                    hosts.clear();
+                    for (String item : found) if (!isHiddenHost(item)) hosts.add(item);
+                    for (String saved : savedHosts.keySet())
+                        if (!isHiddenHost(saved) && !hosts.contains(saved)) hosts.add(saved);
+                    if (mode == Mode.HOSTS) setItems(hostLabels());
+                });
+            } catch (Exception ignored) { }
+        });
     }
 
     private void hideHost(String value) {
@@ -536,9 +609,9 @@ public class SmbBrowserActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     if (isFinishing()) return;
                     hosts.clear();
-                    for (String value : found) if (!hiddenHosts.contains(value)) hosts.add(value);
+                    for (String value : found) if (!isHiddenHost(value)) hosts.add(value);
                     for (String saved : savedHosts.keySet()) {
-                        if (!hiddenHosts.contains(saved) && !hosts.contains(saved)) hosts.add(saved);
+                        if (!isHiddenHost(saved) && !hosts.contains(saved)) hosts.add(saved);
                     }
                     setItems(hostLabels());
                     setStatus(hosts.isEmpty() ? getString(R.string.smb_no_servers)
@@ -547,7 +620,7 @@ public class SmbBrowserActivity extends AppCompatActivity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     hosts.clear();
-                    for (String saved : savedHosts.keySet()) if (!hiddenHosts.contains(saved)) hosts.add(saved);
+                    for (String saved : savedHosts.keySet()) if (!isHiddenHost(saved)) hosts.add(saved);
                     setItems(hostLabels());
                     setStatus(hosts.isEmpty() ? getString(R.string.smb_no_servers) : getString(R.string.smb_server_count, hosts.size()));
                 });
@@ -556,16 +629,8 @@ public class SmbBrowserActivity extends AppCompatActivity {
     }
 
     private void onItemClick(int position) {
-        if (showingHiddenHosts) {
-            if (isTvDevice() && position >= 0 && position < hiddenHosts.size()) {
-                restoreHiddenHost(new ArrayList<>(hiddenHosts).get(position));
-            }
-            return;
-        }
-        if (showingHiddenFolders) {
-            if (isTvDevice()) restoreHiddenFolder(position);
-            return;
-        }
+        if(showingFavorites) { openFavorite(position); return; }
+        if(showingHiddenHosts||showingHiddenFolders) { if(isTvDevice()) activateHiddenItem(position); return; }
         if (mode == Mode.HOSTS) {
             if (position < hosts.size()) connectHost(hosts.get(position), false);
             return;
@@ -856,15 +921,39 @@ public class SmbBrowserActivity extends AppCompatActivity {
 
     private void showImage(String remotePath) {
         try {
-            String url = SmbPlaybackProxy.createUrl(host, share, remotePath, username, password, domain);
-            String name = remotePath.substring(remotePath.lastIndexOf((char) 92) + 1);
+            List<String> imagePaths = new ArrayList<>();
+            if (showingFavorites) {
+                for (String favorite : favorites) {
+                    String[] parts = favorite.split("\\n", 4);
+                    if (parts.length != 4 || !parts[0].equals(host)
+                            || !parts[1].equals(share) || !parts[3].equals("F")) continue;
+                    String favoritePath = parts[2];
+                    int separator = favoritePath.lastIndexOf((char) 92);
+                    String favoriteFolder = separator < 0 ? "" : favoritePath.substring(0, separator);
+                    String favoriteName = separator < 0 ? favoritePath : favoritePath.substring(separator + 1);
+                    if (favoriteFolder.equals(path) && SmbClient.isImage(favoriteName)) {
+                        imagePaths.add(favoritePath);
+                    }
+                }
+            } else {
+                for (SmbClient.Entry entry : visibleFiles) {
+                    if (entry.directory || !SmbClient.isImage(entry.name)) continue;
+                    imagePaths.add(path.isEmpty() ? entry.name : path + "\\" + entry.name);
+                }
+            }
+            int initialIndex = imagePaths.indexOf(remotePath);
+            if (initialIndex < 0) {
+                imagePaths.add(remotePath);
+                initialIndex = imagePaths.size() - 1;
+            }
+            final int[] imageIndex = {initialIndex};
 
             LinearLayout content = new LinearLayout(this);
             content.setOrientation(LinearLayout.VERTICAL);
             content.setBackgroundColor(Color.BLACK);
 
             TextView imageTitle = new TextView(this);
-            imageTitle.setText(name);
+            imageTitle.setText("");
             imageTitle.setTextColor(MaterialColors.getColor(this,
                     com.google.android.material.R.attr.colorOnPrimaryContainer, Color.WHITE));
             imageTitle.setTextSize(18);
@@ -893,26 +982,48 @@ public class SmbBrowserActivity extends AppCompatActivity {
                     Gravity.CENTER));
 
             Dialog dialog = new Dialog(this);
+            final int[] originalOrientation = {getRequestedOrientation()};
+            final boolean[] landscapeFullscreen = {false};
             dialog.setContentView(content);
             dialog.setCanceledOnTouchOutside(false);
             dialog.setOnKeyListener((dialogInterface, keyCode, event) -> {
-                if (event.getAction() != KeyEvent.ACTION_DOWN || event.getRepeatCount() > 0) return false;
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    changeImagePage(imagePaths, imageIndex, -1, imageTitle, image);
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    changeImagePage(imagePaths, imageIndex, 1, imageTitle, image);
+                    return true;
+                }
+                if (event.getRepeatCount() > 0) return false;
                 if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER
                         || keyCode == KeyEvent.KEYCODE_ENTER
                         || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
-                    toggleImageFullscreen(dialog, imageTitle);
+                    toggleImageFullscreen(dialog, imageTitle, originalOrientation, landscapeFullscreen);
                     return true;
                 }
                 return false;
             });
-            image.setOnClickListener(v -> {
-                if (isTvDevice()) {
-                    toggleImageFullscreen(dialog, imageTitle);
-                } else if (getResources().getDisplayMetrics().widthPixels
-                        >= getResources().getDisplayMetrics().heightPixels) {
-                    toggleImageFullscreen(dialog, imageTitle);
-                } else {
-                    togglePhoneImageRotation(dialog, imageTitle, image, imageContainer);
+            image.setOnTouchListener((view, event) -> {
+                if (isTvDevice()) return false;
+                if (event.getAction() == android.view.MotionEvent.ACTION_UP) {
+                    float x = event.getX();
+                    float width = view.getWidth();
+                    if (width > 0 && x < width / 3f) {
+                        changeImagePage(imagePaths, imageIndex, -1, imageTitle, image);
+                    } else if (width > 0 && x > width * 2f / 3f) {
+                        changeImagePage(imagePaths, imageIndex, 1, imageTitle, image);
+                    } else {
+                        toggleImageFullscreen(dialog, imageTitle, originalOrientation, landscapeFullscreen);
+                    }
+                }
+                return true;
+            });
+            dialog.setOnDismissListener(ignored -> {
+                if (landscapeFullscreen[0]) {
+                    setRequestedOrientation(originalOrientation[0]);
+                    landscapeFullscreen[0] = false;
                 }
             });
             dialog.setOnShowListener(ignored -> {
@@ -926,7 +1037,32 @@ public class SmbBrowserActivity extends AppCompatActivity {
                 image.requestFocus();
             });
             dialog.show();
+            loadSmbImage(imagePaths.get(imageIndex[0]), imageTitle, image);
+        } catch (Exception e) {
+            Toast.makeText(this, getString(R.string.smb_connect_failed) + "：" + shortError(e), Toast.LENGTH_LONG).show();
+        }
+    }
 
+    private void changeImagePage(List<String> imagePaths, int[] imageIndex, int direction,
+                                 TextView imageTitle, ImageView image) {
+        int nextIndex = imageIndex[0] + direction;
+        if (nextIndex < 0 || nextIndex >= imagePaths.size()) {
+            Toast.makeText(this, "到底了", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        imageIndex[0] = nextIndex;
+        image.setRotation(0f);
+        image.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER));
+        loadSmbImage(imagePaths.get(nextIndex), imageTitle, image);
+    }
+
+    private void loadSmbImage(String remotePath, TextView imageTitle, ImageView image) {
+        try {
+            String url = SmbPlaybackProxy.createUrl(host, share, remotePath, username, password, domain);
+            String name = remotePath.substring(remotePath.lastIndexOf((char) 92) + 1);
+            imageTitle.setText(name);
             Glide.with(this)
                     .load(url)
                     .override(getResources().getDisplayMetrics().widthPixels,
@@ -941,31 +1077,8 @@ public class SmbBrowserActivity extends AppCompatActivity {
         }
     }
 
-    private void togglePhoneImageRotation(Dialog dialog, TextView imageTitle,
-                                          ImageView image, FrameLayout container) {
-        if (image.getRotation() != 0f) {
-            image.setRotation(0f);
-            image.setLayoutParams(new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    Gravity.CENTER));
-            toggleImageFullscreen(dialog, imageTitle);
-            return;
-        }
-
-        // 竖屏点击旋转时同步进入全屏，第二次点击恢复原图并退出全屏。
-        toggleImageFullscreen(dialog, imageTitle);
-        image.setRotation(90f);
-        container.post(() -> {
-            if (!dialog.isShowing() || image.getRotation() == 0f) return;
-            int width = container.getWidth();
-            int height = container.getHeight();
-            if (width <= 0 || height <= 0) return;
-            image.setLayoutParams(new FrameLayout.LayoutParams(height, width, Gravity.CENTER));
-        });
-    }
-
-    private void toggleImageFullscreen(Dialog dialog, TextView imageTitle) {
+    private void toggleImageFullscreen(Dialog dialog, TextView imageTitle,
+                                        int[] originalOrientation, boolean[] landscapeFullscreen) {
         Window window = dialog.getWindow();
         if (window == null) return;
         boolean fullscreen = imageTitle.getVisibility() == View.VISIBLE;
@@ -976,12 +1089,21 @@ public class SmbBrowserActivity extends AppCompatActivity {
                     View.SYSTEM_UI_FLAG_FULLSCREEN
                             | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                             | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+            if (!isTvDevice() && !landscapeFullscreen[0]) {
+                originalOrientation[0] = getRequestedOrientation();
+                landscapeFullscreen[0] = true;
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+            }
         } else {
             imageTitle.setVisibility(View.VISIBLE);
-            window.setLayout(
-                    (int) (getResources().getDisplayMetrics().widthPixels * 0.92f),
-                    (int) (getResources().getDisplayMetrics().heightPixels * 0.84f));
+            if (!isTvDevice() && landscapeFullscreen[0]) {
+                setRequestedOrientation(originalOrientation[0]);
+                landscapeFullscreen[0] = false;
+            }
             window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+            window.getDecorView().post(() -> window.setLayout(
+                    (int) (getResources().getDisplayMetrics().widthPixels * 0.92f),
+                    (int) (getResources().getDisplayMetrics().heightPixels * 0.84f)));
         }
     }
 
@@ -992,7 +1114,8 @@ public class SmbBrowserActivity extends AppCompatActivity {
     }
 
     private void goBack() {
-        if (showingHiddenHosts || showingHiddenFolders) {
+        if (showingFavorites || showingHiddenHosts || showingHiddenFolders) {
+            showingFavorites = false;
             showingHiddenHosts = false;
             showingHiddenFolders = false;
             mode = Mode.HOSTS;
@@ -1065,14 +1188,16 @@ public class SmbBrowserActivity extends AppCompatActivity {
                 return true;
             }
             if (mode == Mode.FILES) {
-                int filePosition = position;
-                if (filePosition >= 0 && filePosition < visibleFiles.size()
-                        && visibleFiles.get(filePosition).directory) {
-                    String folderPath = path.isEmpty() ? visibleFiles.get(filePosition).name
-                            : path + "\\" + visibleFiles.get(filePosition).name;
-                    showFolderActions(folderPath);
-                    return true;
+                int filePosition=position;
+                if(filePosition>=0&&filePosition<visibleFiles.size()) {
+                    SmbClient.Entry entry=visibleFiles.get(filePosition);
+                    String remote=path.isEmpty()?entry.name:path+"\\"+entry.name;
+                    showFileActions(remote,entry.directory); return true;
                 }
+            }
+            if (mode == Mode.FAVORITES && position >= 0 && position < favorites.size()) {
+                showFavoriteActions(position);
+                return true;
             }
         }
         return super.onKeyDown(keyCode, event);

@@ -49,6 +49,12 @@ while IFS= read -r -d '' src; do
 done < <(find "$MOD" -type f -print0)
 
 
+# EventIndex：避免依赖未生成的 EventBus 索引类
+if [[ -f "$MOD/hooks/inject_startup_no_eventindex.py" ]]; then
+  echo "[mod] inject_startup_no_eventindex"
+  python3 "$MOD/hooks/inject_startup_no_eventindex.py" "$ROOT" || exit 1
+fi
+
 # 清除误加的 vod_home 独立资源，避免与 strings.xml 重复
 rm -f "$ROOT/app/src/mobile/res/values/strings_vod_home.xml" \
       "$ROOT/app/src/mobile/res/values-zh-rCN/strings_vod_home.xml" \
@@ -240,6 +246,7 @@ fi
 if [[ -f "$MOD/hooks/inject_toast_gate.py" ]]; then
   python3 "$MOD/hooks/inject_toast_gate.py" "$ROOT"
 fi
+run_hook "$MOD/hooks/fix_immersive_audio_video_gate.py"
 
 echo "[mod] done"
 
@@ -264,4 +271,10 @@ fi
 if [[ -f "$MOD/hooks/inject_hdr_to_sdr.py" ]]; then
   echo "[mod] inject_hdr_to_sdr"
   python3 "$MOD/hooks/inject_hdr_to_sdr.py" "$ROOT" || exit 1
+fi
+
+# 播放控制栏当前视频大小：在其他播放器补丁之后最后注入
+if [[ -f "$MOD/hooks/inject_video_size.py" ]]; then
+  echo "[mod] inject_video_size"
+  python3 "$MOD/hooks/inject_video_size.py" "$ROOT" || exit 1
 fi
